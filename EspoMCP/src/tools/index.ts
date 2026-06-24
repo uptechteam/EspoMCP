@@ -27,29 +27,50 @@ import {
   formatNoteResults,
   formatLargeResultSet 
 } from "../utils/formatting.js";
-import { NameSchema, EmailSchema, PhoneSchema, IdSchema, DateSchema, UrlSchema, sanitizeInput, validateAmount, validateProbability } from "../utils/validation.js";
+import { NameSchema, EmailSchema, PhoneSchema, IdSchema, DateSchema, UrlSchema, FlexibleDateTimeSchema, FlexibleDateSchema, sanitizeInput, normalizeDateTime, normalizeDate, normalizeTaskDates, validateAmount, validateProbability } from "../utils/validation.js";
 import logger from "../utils/logger.js";
+import { isSchemaOnlyMode } from "../config/index.js";
 
 export async function setupEspoCRMTools(server: Server, config: Config): Promise<void> {
   logger.info('Setting up EspoCRM tools', { 
     baseUrl: config.espocrm.baseUrl,
-    authMethod: config.espocrm.authMethod 
+    authMethod: config.espocrm.authMethod,
+    schemaOnly: isSchemaOnlyMode,
   });
   
   try {
-    // Initialize EspoCRM client
-    const client = new EspoCRMClient(config.espocrm);
-    
-    // Test connection before setting up tools
-    const connectionTest = await client.testConnection();
-    if (!connectionTest.success) {
-      throw new Error("Failed to connect to EspoCRM. Please check your configuration.");
+    // Initialize default EspoCRM client
+    const defaultClient = new EspoCRMClient(config.espocrm, config.server.rateLimit);
+
+    // Per-user API key override: cache clients to avoid re-creating on every request
+    const clientCache = new Map<string, EspoCRMClient>();
+
+    function getClientForKey(apiKey: string): EspoCRMClient {
+      let cached = clientCache.get(apiKey);
+      if (!cached) {
+        cached = new EspoCRMClient(
+          { ...config.espocrm, apiKey },
+          config.server.rateLimit,
+        );
+        clientCache.set(apiKey, cached);
+      }
+      return cached;
     }
     
-    logger.info('EspoCRM connection verified', { 
-      version: connectionTest.version,
-      user: connectionTest.user?.userName 
-    });
+    // Skip connection test in schema-only mode — we only need tools/list
+    if (!isSchemaOnlyMode) {
+      const connectionTest = await defaultClient.testConnection();
+      if (!connectionTest.success) {
+        throw new Error("Failed to connect to EspoCRM. Please check your configuration.");
+      }
+      
+      logger.info('EspoCRM connection verified', { 
+        version: connectionTest.version,
+        user: connectionTest.user?.userName 
+      });
+    } else {
+      logger.info('Schema-only mode: skipping EspoCRM connection test');
+    }
     
     // Register tools list handler
     server.setRequestHandler(ListToolsRequestSchema, async (request) => {
@@ -67,7 +88,6 @@ export async function setupEspoCRMTools(server: Server, config: Config): Promise
                 emailAddress: { type: "string", description: "Contact's email address" },
                 phoneNumber: { type: "string", description: "Contact's phone number" },
                 accountId: { type: "string", description: "ID of the account this contact belongs to" },
-                title: { type: "string", description: "Job title or position" },
                 department: { type: "string", description: "Department within the organization" },
                 description: { type: "string", description: "Additional notes about the contact" },
               },
@@ -195,6 +215,7 @@ export async function setupEspoCRMTools(server: Server, config: Config): Promise
                 name: { type: "string", description: "Meeting name/title" },
                 dateStart: { type: "string", description: "Start date and time in ISO format (YYYY-MM-DDTHH:mm:ss)" },
                 dateEnd: { type: "string", description: "End date and time in ISO format (YYYY-MM-DDTHH:mm:ss)" },
+                assignedUserId: { type: "string", description: "ID of the user to assign this meeting to" },
                 location: { type: "string", description: "Meeting location" },
                 description: { type: "string", description: "Meeting description or agenda" },
                 status: { type: "string", enum: ["Planned", "Held", "Not Held"], description: "Meeting status", default: "Planned" },
@@ -203,7 +224,7 @@ export async function setupEspoCRMTools(server: Server, config: Config): Promise
                 contactsIds: { type: "array", items: { type: "string" }, description: "Array of contact IDs to invite" },
                 usersIds: { type: "array", items: { type: "string" }, description: "Array of user IDs to invite" },
               },
-              required: ["name", "dateStart", "dateEnd"],
+              required: ["name", "dateStart", "dateEnd", "assignedUserId"],
             },
           },
           {
@@ -285,18 +306,18 @@ export async function setupEspoCRMTools(server: Server, config: Config): Promise
           // Task tools
           {
             name: "create_task",
-            description: "Create a new task and assign it to a user with optional parent entity (Lead, Account, Contact, Opportunity)",
+            description: "Create a new task. IMPORTANT: Only use the fields listed here — no other fields are accepted. The dateEnd field accepts ONLY a date (YYYY-MM-DD), never include a time component.",
             inputSchema: {
               type: "object",
               properties: {
-                name: { type: "string", description: "Task name/title" },
-                assignedUserId: { type: "string", description: "ID of the user to assign this task to" },
-                parentType: { type: "string", enum: ["Lead", "Account", "Contact", "Opportunity"], description: "Type of parent entity" },
-                parentId: { type: "string", description: "ID of the parent entity" },
+                name: { type: "string", description: "Task name/title (required, max 255 chars)" },
+                assignedUserId: { type: "string", description: "ID of the user to assign this task to (use search_users or get_user_by_email to find IDs)" },
+                parentType: { type: "string", enum: ["Lead", "Account", "Contact", "Opportunity"], description: "Type of parent entity to link this task to" },
+                parentId: { type: "string", description: "ID of the parent entity (required if parentType is set)" },
                 status: { type: "string", enum: ["Not Started", "Started", "Completed", "Canceled", "Deferred"], description: "Task status", default: "Not Started" },
                 priority: { type: "string", enum: ["Low", "Normal", "High", "Urgent"], description: "Task priority", default: "Normal" },
-                dateEnd: { type: "string", description: "Due date in YYYY-MM-DD format" },
-                description: { type: "string", description: "Task description" },
+                dateEnd: { type: "string", description: "Due date. MUST be YYYY-MM-DD format only (e.g. '2026-06-15'). Do NOT include time. Do NOT use ISO datetime." },
+                description: { type: "string", description: "Task description (max 1000 chars)" },
               },
               required: ["name"],
             },
@@ -335,17 +356,17 @@ export async function setupEspoCRMTools(server: Server, config: Config): Promise
           },
           {
             name: "update_task",
-            description: "Update an existing task",
+            description: "Update an existing task. IMPORTANT: Only use the fields listed here — no other fields are accepted. The dateEnd field accepts ONLY a date (YYYY-MM-DD), never include a time component.",
             inputSchema: {
               type: "object",
               properties: {
-                taskId: { type: "string", description: "The unique ID of the task to update" },
-                name: { type: "string", description: "Task name/title" },
+                taskId: { type: "string", description: "The unique ID of the task to update (required)" },
+                name: { type: "string", description: "Task name/title (max 255 chars)" },
                 assignedUserId: { type: "string", description: "ID of the user to assign this task to" },
                 status: { type: "string", enum: ["Not Started", "Started", "Completed", "Canceled", "Deferred"], description: "Task status" },
                 priority: { type: "string", enum: ["Low", "Normal", "High", "Urgent"], description: "Task priority" },
-                dateEnd: { type: "string", description: "Due date in YYYY-MM-DD format" },
-                description: { type: "string", description: "Task description" },
+                dateEnd: { type: "string", description: "Due date. MUST be YYYY-MM-DD format only (e.g. '2026-06-15'). Do NOT include time. Do NOT use ISO datetime." },
+                description: { type: "string", description: "Task description (max 1000 chars)" },
               },
               required: ["taskId"],
             },
@@ -556,14 +577,14 @@ export async function setupEspoCRMTools(server: Server, config: Config): Promise
           },
           {
             name: "search_entity",
-            description: "Search any entity type with flexible filters",
+            description: "Search any entity type with flexible filters. Returns at most 10 records by default — use specific filters to narrow results.",
             inputSchema: {
               type: "object",
               properties: {
                 entityType: { type: "string", description: "The entity type to search (e.g., 'Contact', 'CustomEntity')" },
                 filters: { type: "object", description: "Search filters as key-value pairs" },
                 select: { type: "array", items: { type: "string" }, description: "Fields to include in results" },
-                limit: { type: "number", description: "Maximum number of results to return", default: 20 },
+                limit: { type: "number", description: "Maximum number of results to return (max 50)", default: 10 },
                 offset: { type: "number", description: "Number of records to skip", default: 0 },
                 orderBy: { type: "string", description: "Field to order by" },
                 order: { type: "string", enum: ["asc", "desc"], description: "Sort order", default: "asc" },
@@ -805,6 +826,26 @@ export async function setupEspoCRMTools(server: Server, config: Config): Promise
     server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest): Promise<CallToolResult> => {
       const { name, arguments: args } = request.params;
 
+      // Per-user API key override support
+      const apiKeyOverride = (args as Record<string, unknown>)?._apiKeyOverride as string | undefined;
+      if (args && '_apiKeyOverride' in (args as Record<string, unknown>)) {
+        delete (args as Record<string, unknown>)._apiKeyOverride;
+      }
+      const client = apiKeyOverride ? getClientForKey(apiKeyOverride) : defaultClient;
+
+      // Per-user ID override — used to set assignedUserId on created records
+      // so they are assigned to the logged-in user, not the shared API user.
+      const userIdOverride = (args as Record<string, unknown>)?._userIdOverride as string | undefined;
+      if (args && '_userIdOverride' in (args as Record<string, unknown>)) {
+        delete (args as Record<string, unknown>)._userIdOverride;
+      }
+
+      // Per-user name override — used for attribution in stream notes
+      const userNameOverride = (args as Record<string, unknown>)?._userNameOverride as string | undefined;
+      if (args && '_userNameOverride' in (args as Record<string, unknown>)) {
+        delete (args as Record<string, unknown>)._userNameOverride;
+      }
+
       try {
         switch (name) {
           case "create_contact": {
@@ -814,13 +855,13 @@ export async function setupEspoCRMTools(server: Server, config: Config): Promise
               emailAddress: EmailSchema.optional(),
               phoneNumber: PhoneSchema.optional(),
               accountId: IdSchema.optional(),
-              title: z.string().max(100).optional(),
               department: z.string().max(100).optional(),
               description: z.string().max(1000).optional(),
             });
             
             const validatedArgs = schema.parse(args);
             const sanitizedArgs = sanitizeInput(validatedArgs);
+            if (userIdOverride) sanitizedArgs.assignedUserId = userIdOverride;
             const contact = await client.post<Contact>('Contact', sanitizedArgs);
             
             return {
@@ -852,12 +893,8 @@ export async function setupEspoCRMTools(server: Server, config: Config): Promise
             
             if (validatedArgs.searchTerm) {
               where.push({
-                type: 'or' as const,
-                value: [
-                  { type: 'contains' as const, attribute: 'firstName', value: validatedArgs.searchTerm },
-                  { type: 'contains' as const, attribute: 'lastName', value: validatedArgs.searchTerm },
-                  { type: 'contains' as const, attribute: 'emailAddress', value: validatedArgs.searchTerm }
-                ]
+                type: 'textFilter' as const,
+                value: validatedArgs.searchTerm
               });
             }
             
@@ -903,7 +940,7 @@ export async function setupEspoCRMTools(server: Server, config: Config): Promise
             
             const response = await client.search<Contact>('Contact', {
               where: where.length > 0 ? where : undefined,
-              select: ['id', 'firstName', 'lastName', 'emailAddress', 'phoneNumber', 'accountName', 'title'],
+              select: ['id', 'firstName', 'lastName', 'emailAddress', 'phoneNumber', 'accountName'],
               maxSize: validatedArgs.limit,
               offset: validatedArgs.offset,
               orderBy: 'lastName',
@@ -954,6 +991,7 @@ export async function setupEspoCRMTools(server: Server, config: Config): Promise
             
             const validatedArgs = schema.parse(args);
             const sanitizedArgs = sanitizeInput(validatedArgs);
+            if (userIdOverride) sanitizedArgs.assignedUserId = userIdOverride;
             const account = await client.post<Account>('Account', sanitizedArgs);
             
             return {
@@ -1084,6 +1122,7 @@ export async function setupEspoCRMTools(server: Server, config: Config): Promise
             }
             
             const sanitizedArgs = sanitizeInput(validatedArgs);
+            if (userIdOverride) sanitizedArgs.assignedUserId = userIdOverride;
             const opportunity = await client.post<Opportunity>('Opportunity', sanitizedArgs);
             
             return {
@@ -1178,8 +1217,9 @@ export async function setupEspoCRMTools(server: Server, config: Config): Promise
           case "create_meeting": {
             const schema = z.object({
               name: z.string().min(1).max(255),
-              dateStart: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/, "Invalid ISO datetime format"),
-              dateEnd: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/, "Invalid ISO datetime format"),
+              dateStart: FlexibleDateTimeSchema,
+              dateEnd: FlexibleDateTimeSchema,
+              assignedUserId: IdSchema,
               location: z.string().max(255).optional(),
               description: z.string().max(1000).optional(),
               status: z.enum(['Planned', 'Held', 'Not Held']).default('Planned'),
@@ -1191,6 +1231,9 @@ export async function setupEspoCRMTools(server: Server, config: Config): Promise
             
             const validatedArgs = schema.parse(args);
             const sanitizedArgs = sanitizeInput(validatedArgs);
+            sanitizedArgs.dateStart = normalizeDateTime(sanitizedArgs.dateStart);
+            sanitizedArgs.dateEnd = normalizeDateTime(sanitizedArgs.dateEnd);
+            if (userIdOverride && !sanitizedArgs.assignedUserId) sanitizedArgs.assignedUserId = userIdOverride;
             const meeting = await client.post<Meeting>('Meeting', sanitizedArgs);
             
             // Link contacts and users if provided
@@ -1318,8 +1361,8 @@ export async function setupEspoCRMTools(server: Server, config: Config): Promise
             const schema = z.object({
               meetingId: IdSchema,
               name: z.string().min(1).max(255).optional(),
-              dateStart: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/, "Invalid ISO datetime format").optional(),
-              dateEnd: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/, "Invalid ISO datetime format").optional(),
+              dateStart: FlexibleDateTimeSchema.optional(),
+              dateEnd: FlexibleDateTimeSchema.optional(),
               location: z.string().max(255).optional(),
               description: z.string().max(1000).optional(),
               status: z.enum(['Planned', 'Held', 'Not Held']).optional(),
@@ -1328,8 +1371,10 @@ export async function setupEspoCRMTools(server: Server, config: Config): Promise
             const validatedArgs = schema.parse(args);
             const { meetingId, ...updateData } = validatedArgs;
             const sanitizedData = sanitizeInput(updateData);
+            if (sanitizedData.dateStart) sanitizedData.dateStart = normalizeDateTime(sanitizedData.dateStart);
+            if (sanitizedData.dateEnd) sanitizedData.dateEnd = normalizeDateTime(sanitizedData.dateEnd);
             
-            await client.put<Meeting>('Meeting', meetingId, sanitizedData);
+            await client.patch<Meeting>('Meeting', meetingId, sanitizedData);
             
             return {
               content: [
@@ -1497,12 +1542,14 @@ Current time: ${new Date().toISOString()}`;
               parentId: IdSchema.optional(),
               status: z.enum(['Not Started', 'Started', 'Completed', 'Canceled', 'Deferred']).default('Not Started'),
               priority: z.enum(['Low', 'Normal', 'High', 'Urgent']).default('Normal'),
-              dateEnd: DateSchema.optional(),
+              dateEnd: FlexibleDateSchema.optional(),
               description: z.string().max(1000).optional(),
             });
             
             const validatedArgs = schema.parse(args);
-            const sanitizedArgs = sanitizeInput(validatedArgs);
+            let sanitizedArgs = sanitizeInput(validatedArgs);
+            if (userIdOverride && !sanitizedArgs.assignedUserId) sanitizedArgs.assignedUserId = userIdOverride;
+            sanitizedArgs = normalizeTaskDates('Task', sanitizedArgs);
             const task = await client.post<Task>('Task', sanitizedArgs);
             
             return {
@@ -1652,15 +1699,16 @@ Current time: ${new Date().toISOString()}`;
               assignedUserId: IdSchema.optional(),
               status: z.enum(['Not Started', 'Started', 'Completed', 'Canceled', 'Deferred']).optional(),
               priority: z.enum(['Low', 'Normal', 'High', 'Urgent']).optional(),
-              dateEnd: DateSchema.optional(),
+              dateEnd: FlexibleDateSchema.optional(),
               description: z.string().max(1000).optional(),
             });
             
             const validatedArgs = schema.parse(args);
             const { taskId, ...updateData } = validatedArgs;
-            const sanitizedData = sanitizeInput(updateData);
+            let sanitizedData = sanitizeInput(updateData);
+            sanitizedData = normalizeTaskDates('Task', sanitizedData);
             
-            await client.put<Task>('Task', taskId, sanitizedData);
+            await client.patch<Task>('Task', taskId, sanitizedData);
             
             return {
               content: [
@@ -1681,7 +1729,7 @@ Current time: ${new Date().toISOString()}`;
             const validatedArgs = schema.parse(args);
             const updateData = { assignedUserId: validatedArgs.assignedUserId };
             
-            await client.put<Task>('Task', validatedArgs.taskId, updateData);
+            await client.patch<Task>('Task', validatedArgs.taskId, updateData);
             
             return {
               content: [
@@ -1710,6 +1758,7 @@ Current time: ${new Date().toISOString()}`;
             
             const validatedArgs = schema.parse(args);
             const sanitizedArgs = sanitizeInput(validatedArgs);
+            if (userIdOverride && !sanitizedArgs.assignedUserId) sanitizedArgs.assignedUserId = userIdOverride;
             const lead = await client.post<Lead>('Lead', sanitizedArgs);
             
             return {
@@ -1866,7 +1915,7 @@ Current time: ${new Date().toISOString()}`;
             const { leadId, ...updateData } = validatedArgs;
             const sanitizedData = sanitizeInput(updateData);
             
-            await client.put<Lead>('Lead', leadId, sanitizedData);
+            await client.patch<Lead>('Lead', leadId, sanitizedData);
             
             return {
               content: [
@@ -1903,7 +1952,7 @@ Current time: ${new Date().toISOString()}`;
                 name: lead.accountName,
                 website: lead.website,
                 industry: lead.industry,
-                assignedUserId: lead.assignedUserId,
+                assignedUserId: userIdOverride || lead.assignedUserId,
               });
               accountId = account.id;
               results.push(`Created account: ${lead.accountName} (ID: ${account.id})`);
@@ -1917,7 +1966,7 @@ Current time: ${new Date().toISOString()}`;
                 emailAddress: lead.emailAddress,
                 phoneNumber: lead.phoneNumber,
                 accountId: accountId,
-                assignedUserId: lead.assignedUserId,
+                assignedUserId: userIdOverride || lead.assignedUserId,
                 description: lead.description,
               });
               contactId = contact.id;
@@ -1932,14 +1981,14 @@ Current time: ${new Date().toISOString()}`;
                 stage: 'Prospecting',
                 amount: validatedArgs.opportunityAmount,
                 closeDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // 30 days from now
-                assignedUserId: lead.assignedUserId,
+                assignedUserId: userIdOverride || lead.assignedUserId,
               });
               opportunityId = opportunity.id;
               results.push(`Created opportunity: ${validatedArgs.opportunityName} (ID: ${opportunity.id})`);
             }
             
             // Update lead status to Converted
-            await client.put<Lead>('Lead', validatedArgs.leadId, { status: 'Converted' });
+            await client.patch<Lead>('Lead', validatedArgs.leadId, { status: 'Converted' });
             results.push(`Lead ${validatedArgs.leadId} marked as Converted`);
             
             return {
@@ -1961,7 +2010,7 @@ Current time: ${new Date().toISOString()}`;
             const validatedArgs = schema.parse(args);
             const updateData = { assignedUserId: validatedArgs.assignedUserId };
             
-            await client.put<Lead>('Lead', validatedArgs.leadId, updateData);
+            await client.patch<Lead>('Lead', validatedArgs.leadId, updateData);
             
             return {
               content: [
@@ -2028,7 +2077,7 @@ Current time: ${new Date().toISOString()}`;
             const validatedArgs = schema.parse(args);
             
             // Update user's role assignment
-            await client.put('User', validatedArgs.userId, { 
+            await client.patch('User', validatedArgs.userId, { 
               rolesIds: [validatedArgs.roleId] 
             });
             
@@ -2174,7 +2223,9 @@ Current time: ${new Date().toISOString()}`;
             });
             
             const validatedArgs = schema.parse(args);
-            const sanitizedData = sanitizeInput(validatedArgs.data);
+            let sanitizedData = sanitizeInput(validatedArgs.data);
+            sanitizedData = normalizeTaskDates(validatedArgs.entityType, sanitizedData);
+            if (userIdOverride && !sanitizedData.assignedUserId) sanitizedData.assignedUserId = userIdOverride;
             
             const entity = await client.post<GenericEntity>(validatedArgs.entityType, sanitizedData);
             
@@ -2193,22 +2244,34 @@ Current time: ${new Date().toISOString()}`;
               entityType: z.string().min(1),
               filters: z.record(z.any()).optional(),
               select: z.array(z.string()).optional(),
-              limit: z.number().min(1).max(200).default(20),
+              limit: z.number().min(1).max(50).default(10),
               offset: z.number().min(0).default(0),
               orderBy: z.string().optional(),
               order: z.enum(['asc', 'desc']).default('asc'),
             });
             
             const validatedArgs = schema.parse(args);
+
+            // Email entity has special field handling — strip unsafe select fields
+            if (validatedArgs.entityType === 'Email' && validatedArgs.select) {
+              const unsafeEmailFields = new Set(['from', 'to', 'cc', 'bcc', 'replyTo']);
+              validatedArgs.select = validatedArgs.select.filter(f => !unsafeEmailFields.has(f));
+              if (validatedArgs.select.length === 0) delete validatedArgs.select;
+            }
             
             // Convert filters to EspoCRM where clauses
             const where = [];
             if (validatedArgs.filters) {
+              // Email entity: remap unsafe filter attributes
+              const emailFilterRemap: Record<string, string> = { from: 'fromString', to: 'personStringData' };
               for (const [key, value] of Object.entries(validatedArgs.filters)) {
                 if (value !== null && value !== undefined) {
+                  const attribute = (validatedArgs.entityType === 'Email' && emailFilterRemap[key])
+                    ? emailFilterRemap[key]
+                    : key;
                   where.push({
                     type: typeof value === 'string' ? 'contains' as const : 'equals' as const,
-                    attribute: key,
+                    attribute,
                     value: value
                   });
                 }
@@ -2248,9 +2311,10 @@ Current time: ${new Date().toISOString()}`;
             });
             
             const validatedArgs = schema.parse(args);
-            const sanitizedData = sanitizeInput(validatedArgs.data);
+            let sanitizedData = sanitizeInput(validatedArgs.data);
+            sanitizedData = normalizeTaskDates(validatedArgs.entityType, sanitizedData);
             
-            await client.put<GenericEntity>(validatedArgs.entityType, validatedArgs.entityId, sanitizedData);
+            await client.patch<GenericEntity>(validatedArgs.entityType, validatedArgs.entityId, sanitizedData);
             
             return {
               content: [
@@ -2406,8 +2470,8 @@ Current time: ${new Date().toISOString()}`;
               name: z.string().min(1).max(255),
               status: z.enum(['Planned', 'Held', 'Not Held']).default('Held'),
               direction: z.enum(['Outbound', 'Inbound']),
-              dateStart: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/, "Invalid ISO datetime format").optional(),
-              dateEnd: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/, "Invalid ISO datetime format").optional(),
+              dateStart: FlexibleDateTimeSchema.optional(),
+              dateEnd: FlexibleDateTimeSchema.optional(),
               description: z.string().max(1000).optional(),
               phoneNumber: PhoneSchema.optional(),
               assignedUserId: IdSchema.optional(),
@@ -2418,6 +2482,9 @@ Current time: ${new Date().toISOString()}`;
             
             const validatedArgs = schema.parse(args);
             const sanitizedArgs = sanitizeInput(validatedArgs);
+            if (sanitizedArgs.dateStart) sanitizedArgs.dateStart = normalizeDateTime(sanitizedArgs.dateStart);
+            if (sanitizedArgs.dateEnd) sanitizedArgs.dateEnd = normalizeDateTime(sanitizedArgs.dateEnd);
+            if (userIdOverride && !sanitizedArgs.assignedUserId) sanitizedArgs.assignedUserId = userIdOverride;
             const call = await client.post<Call>('Call', sanitizedArgs);
             
             // Link contacts if provided
@@ -2565,6 +2632,7 @@ Current time: ${new Date().toISOString()}`;
             
             const validatedArgs = schema.parse(args);
             const sanitizedArgs = sanitizeInput(validatedArgs);
+            if (userIdOverride && !sanitizedArgs.assignedUserId) sanitizedArgs.assignedUserId = userIdOverride;
             const supportCase = await client.post<Case>('Case', sanitizedArgs);
             
             return {
@@ -2716,7 +2784,7 @@ Current time: ${new Date().toISOString()}`;
             const { caseId, ...updateData } = validatedArgs;
             const sanitizedData = sanitizeInput(updateData);
             
-            await client.put<Case>('Case', caseId, sanitizedData);
+            await client.patch<Case>('Case', caseId, sanitizedData);
             
             return {
               content: [
@@ -2738,6 +2806,18 @@ Current time: ${new Date().toISOString()}`;
             
             const validatedArgs = schema.parse(args);
             const sanitizedArgs = sanitizeInput(validatedArgs);
+
+            // Attribute the note to the real user (not the shared API user)
+            if (userIdOverride) {
+              sanitizedArgs.createdById = userIdOverride;
+            }
+
+            // Mark as AI-assisted with user attribution so it's visible in the stream
+            const attribution = userNameOverride
+              ? `[via AI · triggered by ${userNameOverride}]`
+              : '[via AI]';
+            sanitizedArgs.post = `${attribution} ${sanitizedArgs.post}`;
+
             const note = await client.post<Note>('Note', sanitizedArgs);
             
             return {

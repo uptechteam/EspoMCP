@@ -7,8 +7,13 @@ import logger from "../utils/logger.js";
 
 export class EspoCRMClient {
   private client: AxiosInstance;
+  private rateLimiter: {
+    timestamps: number[];
+    limit: number;
+    windowMs: number;
+  };
   
-  constructor(private config: EspoCRMConfig) {
+  constructor(private config: EspoCRMConfig, rateLimit?: number) {
     this.client = axios.create({
       baseURL: `${config.baseUrl.replace(/\/$/, '')}/api/v1/`,
       timeout: 30000,
@@ -17,11 +22,45 @@ export class EspoCRMClient {
         'Accept': 'application/json',
       },
     });
+
+    this.rateLimiter = {
+      timestamps: [],
+      limit: rateLimit || 100,
+      windowMs: 60000, // 60 seconds
+    };
     
     this.setupInterceptors();
   }
   
   private setupInterceptors() {
+    // Rate limiter interceptor (runs before auth)
+    this.client.interceptors.request.use(async (config) => {
+      const now = Date.now();
+      // Prune timestamps older than the window
+      this.rateLimiter.timestamps = this.rateLimiter.timestamps.filter(
+        (t) => now - t < this.rateLimiter.windowMs
+      );
+
+      // If at limit, delay until oldest timestamp exits the window
+      if (this.rateLimiter.timestamps.length >= this.rateLimiter.limit) {
+        const oldestTimestamp = this.rateLimiter.timestamps[0];
+        const delay = this.rateLimiter.windowMs - (now - oldestTimestamp);
+        if (delay > 0 && delay <= this.rateLimiter.windowMs) {
+          logger.warn(`Rate limit reached, delaying request by ${delay}ms`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          // Re-prune after delay
+          const afterDelay = Date.now();
+          this.rateLimiter.timestamps = this.rateLimiter.timestamps.filter(
+            (t) => afterDelay - t < this.rateLimiter.windowMs
+          );
+        }
+      }
+
+      // Record this request
+      this.rateLimiter.timestamps.push(Date.now());
+      return config;
+    });
+
     // Request interceptor for authentication
     this.client.interceptors.request.use((config) => {
       if (this.config.authMethod === 'apikey') {
@@ -30,16 +69,11 @@ export class EspoCRMClient {
       } else if (this.config.authMethod === 'hmac' && this.config.secretKey) {
         const method = config.method?.toUpperCase() || 'GET';
         const uri = config.url || '';
-        const body = config.data ? JSON.stringify(config.data) : '';
-        const stringToSign = `${method} /${uri}${body}`;
         
-        const hmac = crypto
-          .createHmac('sha256', this.config.secretKey)
-          .update(stringToSign)
-          .digest('hex');
-          
-        config.headers['X-Hmac-Authorization'] = 
-          Buffer.from(`${this.config.apiKey}:${hmac}`).toString('base64');
+        const headerValue = EspoCRMClient.computeHmacHeader(
+          method, uri, this.config.apiKey, this.config.secretKey
+        );
+        config.headers['X-Hmac-Authorization'] = headerValue;
         logger.debug('Using HMAC authentication');
       }
       
@@ -174,7 +208,17 @@ export class EspoCRMClient {
       const params: any = {};
       
       if (searchParams.where) {
-        params.where = JSON.stringify(searchParams.where);
+        // EspoCRM expects indexed query params: where[0][type], where[0][attribute], where[0][value]
+        // Passing a JSON string is silently ignored — the API returns all records unfiltered.
+        searchParams.where.forEach((clause, index) => {
+          params[`where[${index}][type]`] = clause.type;
+          if (clause.attribute !== undefined) {
+            params[`where[${index}][attribute]`] = clause.attribute;
+          }
+          if (clause.value !== undefined) {
+            params[`where[${index}][value]`] = clause.value;
+          }
+        });
       }
       if (searchParams.select) {
         params.select = searchParams.select.join(',');
@@ -212,6 +256,23 @@ export class EspoCRMClient {
   }
 
   
+  /**
+   * Compute the HMAC-SHA256 signature and return the full X-Hmac-Authorization header value.
+   *
+   * Per the EspoCRM API spec the string-to-sign is `{METHOD} /{URI}` only —
+   * the request body is NOT included.
+   */
+  static computeHmacHeader(method: string, uri: string, apiKey: string, secretKey: string): string {
+    const stringToSign = `${method} /${uri}`;
+
+    const hmac = crypto
+      .createHmac('sha256', secretKey)
+      .update(stringToSign)
+      .digest('hex');
+
+    return Buffer.from(`${apiKey}:${hmac}`).toString('base64');
+  }
+
   // Helper method to build where clauses
   static buildWhereClause(filters: Record<string, any>): WhereClause[] {
     const where: WhereClause[] = [];

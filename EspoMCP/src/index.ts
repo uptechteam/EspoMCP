@@ -13,9 +13,9 @@ try {
       }
     }
   });
-  console.log('✓ Loaded .env file');
+  console.error('✓ Loaded .env file');
 } catch (error) {
-  console.log('ℹ No .env file found, using environment variables only');
+  console.error('ℹ No .env file found, using environment variables only');
 }
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";

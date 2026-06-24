@@ -13,6 +13,7 @@ export interface Contact {
   description?: string;
   title?: string;
   department?: string;
+  [key: string]: any;
 }
 
 export interface Account {
@@ -30,6 +31,7 @@ export interface Account {
   description?: string;
   billingAddress?: Address;
   shippingAddress?: Address;
+  [key: string]: any;
 }
 
 export interface Opportunity {
@@ -48,6 +50,7 @@ export interface Opportunity {
   modifiedAt?: string;
   description?: string;
   nextStep?: string;
+  [key: string]: any;
 }
 
 export interface Lead {
@@ -66,6 +69,7 @@ export interface Lead {
   createdAt?: string;
   modifiedAt?: string;
   description?: string;
+  [key: string]: any;
 }
 
 export interface Task {
@@ -85,6 +89,7 @@ export interface Task {
   createdAt?: string;
   modifiedAt?: string;
   description?: string;
+  [key: string]: any;
 }
 
 export interface Meeting {
@@ -105,6 +110,7 @@ export interface Meeting {
   googleEventId?: string;
   createdAt?: string;
   modifiedAt?: string;
+  [key: string]: any;
 }
 
 export interface User {
@@ -118,6 +124,7 @@ export interface User {
   type?: 'admin' | 'regular' | 'portal' | 'api';
   createdAt?: string;
   modifiedAt?: string;
+  [key: string]: any;
 }
 
 export interface Address {
@@ -140,6 +147,7 @@ export interface Team {
   positionList?: string[];
   createdAt?: string;
   modifiedAt?: string;
+  [key: string]: any;
 }
 
 export interface Role {
@@ -150,6 +158,7 @@ export interface Role {
   fieldData?: Record<string, any>;
   createdAt?: string;
   modifiedAt?: string;
+  [key: string]: any;
 }
 
 export interface Call {
@@ -168,6 +177,7 @@ export interface Call {
   phoneNumber?: string;
   createdAt?: string;
   modifiedAt?: string;
+  [key: string]: any;
 }
 
 export interface Case {
@@ -188,6 +198,7 @@ export interface Case {
   description?: string;
   createdAt?: string;
   modifiedAt?: string;
+  [key: string]: any;
 }
 
 export interface Note {
@@ -202,6 +213,7 @@ export interface Note {
   createdById?: string;
   createdAt?: string;
   modifiedAt?: string;
+  [key: string]: any;
 }
 
 export interface Document {
@@ -220,6 +232,34 @@ export interface Document {
   file?: any;
   createdAt?: string;
   modifiedAt?: string;
+  [key: string]: any;
+}
+
+export interface Email {
+  id?: string;
+  name: string;
+  status: 'Draft' | 'Sending' | 'Sent' | 'Archived' | 'Failed';
+  from?: string;
+  fromString?: string;
+  fromAddress?: string;
+  to?: string;
+  cc?: string;
+  bcc?: string;
+  body?: string;
+  bodyPlain?: string;
+  isHtml?: boolean;
+  dateSent?: string;
+  parentType?: string;
+  parentId?: string;
+  parentName?: string;
+  accountId?: string;
+  accountName?: string;
+  assignedUserId?: string;
+  assignedUserName?: string;
+  createdAt?: string;
+  modifiedAt?: string;
+  hasAttachment?: boolean;
+  [key: string]: any;
 }
 
 export interface GenericEntity {
@@ -241,7 +281,7 @@ export interface WhereClause {
   type: 'equals' | 'notEquals' | 'contains' | 'notContains' | 'startsWith' | 'endsWith' | 
         'greaterThan' | 'lessThan' | 'greaterThanOrEquals' | 'lessThanOrEquals' | 
         'in' | 'notIn' | 'isNull' | 'isNotNull' | 'linkedWith' | 'notLinkedWith' | 
-        'and' | 'or';
+        'textFilter' | 'and' | 'or';
   attribute?: string;
   value?: any;
 }
