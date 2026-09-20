@@ -17,6 +17,7 @@ const ConfigSchema = z.object({
     apiKey: z.string().min(1, "ESPOCRM_API_KEY is required"),
     authMethod: z.enum(['apikey', 'hmac']).default('apikey'),
     secretKey: z.string().optional(),
+    defaultAssignedUserId: z.string().optional(),
   }).refine(
     (data) => data.authMethod !== 'hmac' || (data.secretKey && data.secretKey.length > 0),
     { message: "secretKey is required when authMethod is 'hmac'" }
@@ -38,6 +39,7 @@ const SchemaOnlyConfigSchema = z.object({
     apiKey: z.string().default('schema-only'),
     authMethod: z.enum(['apikey', 'hmac']).default('apikey'),
     secretKey: z.string().optional(),
+    defaultAssignedUserId: z.string().optional(),
   }),
   server: z.object({
     rateLimit: z.number().min(1).default(100),
@@ -53,6 +55,7 @@ export function loadConfig(): Config {
       apiKey: process.env.ESPOCRM_API_KEY || (isSchemaOnlyMode ? 'schema-only' : undefined),
       authMethod: process.env.ESPOCRM_AUTH_METHOD || 'apikey',
       secretKey: process.env.ESPOCRM_SECRET_KEY,
+      defaultAssignedUserId: process.env.ESPOCRM_DEFAULT_ASSIGNED_USER_ID,
     },
     server: {
       rateLimit: parseInt(process.env.RATE_LIMIT || '100'),

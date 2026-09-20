@@ -311,7 +311,7 @@ export async function setupEspoCRMTools(server: Server, config: Config): Promise
               type: "object",
               properties: {
                 name: { type: "string", description: "Task name/title (required, max 255 chars)" },
-                assignedUserId: { type: "string", description: "ID of the user to assign this task to (use search_users or get_user_by_email to find IDs)" },
+                assignedUserId: { type: "string", description: "ID of the user to assign this task to (use search_users or get_user_by_email to find IDs). Some EspoCRM instances mark this field required for Task; if creation fails with a validation error naming assignedUser, supply this." },
                 parentType: { type: "string", enum: ["Lead", "Account", "Contact", "Opportunity"], description: "Type of parent entity to link this task to" },
                 parentId: { type: "string", description: "ID of the parent entity (required if parentType is set)" },
                 status: { type: "string", enum: ["Not Started", "Started", "Completed", "Canceled", "Deferred"], description: "Task status", default: "Not Started" },
@@ -1549,6 +1549,12 @@ Current time: ${new Date().toISOString()}`;
             const validatedArgs = schema.parse(args);
             let sanitizedArgs = sanitizeInput(validatedArgs);
             if (userIdOverride && !sanitizedArgs.assignedUserId) sanitizedArgs.assignedUserId = userIdOverride;
+            // Instances that mark Task.assignedUser as required reject every create
+            // that omits an owner. Fall back to the configured default owner so the
+            // call succeeds instead of failing with a validation error.
+            if (!sanitizedArgs.assignedUserId && config.espocrm.defaultAssignedUserId) {
+              sanitizedArgs.assignedUserId = config.espocrm.defaultAssignedUserId;
+            }
             sanitizedArgs = normalizeTaskDates('Task', sanitizedArgs);
             const task = await client.post<Task>('Task', sanitizedArgs);
             
